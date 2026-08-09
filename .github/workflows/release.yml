@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-2022
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate tag and project version
+        shell: pwsh
+        run: |
+          $cmake = Get-Content -Raw CMakeLists.txt
+          $match = [regex]::Match($cmake, '(?s)project\s*\(\s*mojie\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)')
+          if (-not $match.Success) { throw 'Project version was not found.' }
+          $suffixMatch = [regex]::Match($cmake, 'set\s*\(\s*MOJIE_VERSION_SUFFIX\s+"([0-9A-Za-z.-]*)"\s*\)')
+          if (-not $suffixMatch.Success) { throw 'Project version suffix was not found.' }
+          $expected = "v$($match.Groups[1].Value)$($suffixMatch.Groups[1].Value)"
+          if ($env:GITHUB_REF_NAME -ne $expected) { throw "Tag must be $expected." }
+
+      - name: Checkout AviUtl2 SDK
+        shell: pwsh
+        run: |
+          git clone --filter=blob:none --no-checkout https://github.com/aviutl2/aviutl2_sdk_mirror.git .deps/aviutl2_sdk
+          git -C .deps/aviutl2_sdk fetch --depth=1 origin 5753e971f831ccc27d06e89920914001650d0224
+          git -C .deps/aviutl2_sdk checkout --detach FETCH_HEAD
+
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DMOJIE_AVIUTL2_SDK_DIR="${{ github.workspace }}/.deps/aviutl2_sdk"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        working-directory: build
+        run: ctest -C Release --output-on-failure
+
+      - name: Package
+        shell: pwsh
+        run: ./scripts/package.ps1 -Configuration Release -Version $env:GITHUB_REF_NAME.Substring(1) -SkipBuild -RequireLicense
+
+      - name: Create GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $packages = @(Get-ChildItem -LiteralPath dist -Filter "*.au2pkg.zip" -File)
+          $checksums = @(Get-ChildItem -LiteralPath dist -Filter "*.sha256" -File)
+          if ($packages.Count -ne 1 -or $checksums.Count -ne 1) {
+            throw "Expected exactly one release package and one checksum file."
+          }
+          $assets = @($packages[0].FullName, $checksums[0].FullName)
+          gh release view $tag --json tagName *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @assets --clobber
+          } else {
+            if ($tag -match '[A-Za-z]') {
+              gh release create $tag @assets --generate-notes --verify-tag --prerelease --title "mojie $tag"
+            } else {
+              gh release create $tag @assets --generate-notes --verify-tag --title "mojie $tag"
+            }
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

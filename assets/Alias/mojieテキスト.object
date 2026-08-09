@@ -1,0 +1,14 @@
+[Object]
+[Object.0]
+effect.name=テキスト
+テキスト=<?=obj.module('mojie').render(obj.getvalue('mojie本文','本文') or '',obj.getvalue('テキスト','サイズ'),{enabled=(obj.getvalue('mojie本文','画像設定を一括上書き')==true or obj.getvalue('mojie本文','画像設定を一括上書き')==1 or obj.getvalue('mojie本文','画像設定を一括上書き')=='1' or obj.getvalue('mojie本文','画像設定を一括上書き')=='true'),sizeMode=({[0]=0,[1]=1,[2]=2,['行の高さ']=0,['割合']=1,['ピクセル']=2})[obj.getvalue('mojie本文','サイズ方式')] or 0,sizeValue=obj.getvalue('mojie本文','サイズ'),paddingX=obj.getvalue('mojie本文','横余白'),paddingY=obj.getvalue('mojie本文','縦余白')})?>
+[Object.1]
+effect.name=mojie本文
+本文=
+画像設定を一括上書き=false
+サイズ方式=行の高さ
+サイズ=100.00
+横余白=0.00
+縦余白=0.00
+[Object.2]
+effect.name=標準描画

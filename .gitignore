@@ -1,0 +1,27 @@
+# Local dependencies
+.deps/
+
+# CMake / Visual Studio output
+build/
+out/
+Testing/
+.vs/
+CMakeSettings.json
+
+# Isolated AviUtl2 runtime (contains redistributable binaries and user data)
+sandbox/
+
+# IDE-local files
+.vscode/settings.json
+*.user
+*.suo
+*.VC.db
+*.VC.VC.opendb
+
+# Generated packages
+dist/
+*.au2pkg.zip
+
+#
+testimage/orig
+docs/
