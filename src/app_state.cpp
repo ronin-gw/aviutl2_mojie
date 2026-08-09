@@ -107,6 +107,11 @@ std::shared_ptr<const ReplacementEngine> BuildEngine(const GlobalConfig& config)
                     rule.match_text = ToUtf8(text);
                     rule.emoji_names = emoji_names;
                     rule.ruby_enabled = composition.ruby_enabled;
+                    // A composition's display name is stable across all of its
+                    // match-text aliases, so use it as the automatic ruby text.
+                    // An explicit inline ruby still takes precedence in the
+                    // replacement renderer.
+                    rule.ruby_text_override = ToUtf8(composition.name);
                     rule.image_margin = composition.image_margin;
                     rule.size_mode = config.default_size.mode;
                     rule.size_value = config.default_size.value;

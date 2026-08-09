@@ -200,6 +200,14 @@ CacheSyncResult SyncManagedCache(
     const std::filesystem::path& app_data_path,
     const CacheSyncFailureHandler& failure_handler = {});
 
+// Rebuilds every present managed image, including disabled entries, without
+// using cache freshness checks. As with normal synchronization, stale cache
+// files are never removed.
+CacheSyncResult RegenerateManagedCache(
+    GlobalConfig& config,
+    const std::filesystem::path& app_data_path,
+    const CacheSyncFailureHandler& failure_handler = {});
+
 // Maps every non-empty match text to its image index. Assignment is performed
 // in recognition order, so a later image wins. Missing images are ignored.
 std::unordered_map<std::wstring, std::size_t> BuildReplacementIndex(

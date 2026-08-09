@@ -213,6 +213,16 @@ void TestCompositionRubyUsesWholeSequenceAsOneBase() {
         AutomaticRubySettings{35});
     assert(automatic.render("x", 40) ==
            "</><&left><&right><!0.35+>x</>");
+
+    ReplacementEngine named_aliases({
+        WithRuby(Composition("primary", {"left", "right"}), u8"合成名"),
+        WithRuby(Composition("alias", {"left", "right"}), u8"合成名"),
+    }, false, AutomaticRubySettings{35});
+    assert(named_aliases.render("primary alias", 40) ==
+           u8"</><&left><&right><!0.35+>合成名</> "
+           u8"</><&left><&right><!0.35+>合成名</>");
+    assert(named_aliases.render(u8"alias#明示指定#", 40) ==
+           u8"</><&left><&right><!0.35+>明示指定</>");
 }
 
 void TestCompositionIsOneOccurrenceInAdjacentRubyGroup() {

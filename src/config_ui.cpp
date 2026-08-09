@@ -189,6 +189,7 @@ enum ControlId {
     IdNormalizeWidth,
     IdLoadGlobal,
     IdLoadLocal,
+    IdRegenerateImageCache,
     IdGlobalConfigPath,
     IdLocalConfigPath,
     IdOpenGlobalConfig,
@@ -2039,6 +2040,68 @@ ConversionFailureChoice ShowConversionFailureDialog(
         : ConversionFailureChoice::Back;
 }
 
+void RegenerateImageCache(DialogState& state) {
+    GlobalConfig regeneration_settings = state.global_working;
+    regeneration_settings.load_global = true;
+    regeneration_settings.load_local = LocalPathKnown(state);
+    GlobalConfig recognized = MakeEffectiveConfig(
+        regeneration_settings, state.local_working,
+        state.local_config_file.parent_path());
+
+    HWND button = Item(state, IdRegenerateImageCache);
+    EnableWindow(button, FALSE);
+    bool back_requested = false;
+    const CacheSyncResult cache = RegenerateManagedCache(
+        recognized, state.app_data_path,
+        [&](const Diagnostic& diagnostic, const ImageEntry&) {
+            const ConversionFailureChoice choice =
+                ShowConversionFailureDialog(state, diagnostic);
+            if (choice == ConversionFailureChoice::Skip) {
+                return CacheSyncFailureAction::SkipImage;
+            }
+            back_requested = true;
+            return CacheSyncFailureAction::Stop;
+        });
+    EnableWindow(button, TRUE);
+
+    if (back_requested) {
+        return;
+    }
+    if (!cache.diagnostics.empty()) {
+        const Diagnostic& diagnostic = cache.diagnostics.front();
+        std::wostringstream message;
+        message << L"画像キャッシュを " << cache.copied_count
+                << L" 件再生成しましたが、エラーが発生しました。\n\n"
+                << diagnostic.path.wstring() << L"\n"
+                << diagnostic.message;
+        MessageBoxW(
+            state.window, message.str().c_str(), L"mojie",
+            MB_OK | MB_ICONERROR);
+        return;
+    }
+    if (cache.copied_count == 0 && cache.skipped_images.empty()) {
+        MessageBoxW(
+            state.window,
+            L"再生成できる画像キャッシュがありません。\n"
+            L"現在の画像ソースと画像パスを確認してください。",
+            L"mojie", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    std::wostringstream message;
+    message << L"画像キャッシュを " << cache.copied_count
+            << L" 件再生成しました。";
+    if (!cache.skipped_images.empty()) {
+        message << L"\n変換できない画像を " << cache.skipped_images.size()
+                << L" 件スキップしました。";
+    }
+    message << L"\n\nAviUtl2に反映されない場合は再起動してください。";
+    MessageBoxW(
+        state.window, message.str().c_str(), L"mojie",
+        MB_OK | (cache.skipped_images.empty()
+            ? MB_ICONINFORMATION : MB_ICONWARNING));
+}
+
 bool UnregisterSkippedImage(
     DialogState& state,
     const ImageReference& reference) {
@@ -2239,6 +2302,8 @@ void CreateControls(DialogState& state) {
                340, 108, 260, 22, IdLoadLocal, global);
     SendMessageW(Item(state, IdLoadLocal), BM_SETCHECK,
                  state.global_working.load_local ? BST_CHECKED : BST_UNCHECKED, 0);
+    AddControl(state, 0, WC_BUTTONW, L"画像キャッシュを再生成", BS_PUSHBUTTON | WS_TABSTOP,
+               650, 104, 240, 26, IdRegenerateImageCache, global);
 
     AddControl(state, 0, WC_BUTTONW, L"デフォルト値の設定", BS_GROUPBOX,
                30, 170, 890, 196, 0, global);
@@ -2630,6 +2695,8 @@ LRESULT WindowProcedureImpl(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                     Item(*state, IdImageList), state->editing_image, 4,
                     const_cast<wchar_t*>(summary.c_str()));
             }
+        } else if (id == IdRegenerateImageCache && notification == BN_CLICKED) {
+            RegenerateImageCache(*state);
         } else if (id == IdOpenGlobalConfig && notification == BN_CLICKED) {
             OpenConfigFile(*state, state->global_config_file);
         } else if (id == IdOpenLocalConfig && notification == BN_CLICKED) {

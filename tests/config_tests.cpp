@@ -51,6 +51,105 @@ bool HasPngSignature(const fs::path& path) {
             0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a};
 }
 
+void WriteBgraPng(
+    const fs::path& path,
+    UINT width,
+    UINT height,
+    const std::vector<unsigned char>& pixels) {
+    using Microsoft::WRL::ComPtr;
+
+    assert(width != 0 && height != 0);
+    const UINT stride = width * 4;
+    assert(pixels.size() == static_cast<std::size_t>(stride) * height);
+    fs::create_directories(path.parent_path());
+
+    const HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const bool uninitialize = apartment == S_OK || apartment == S_FALSE;
+    if (FAILED(apartment) && apartment != RPC_E_CHANGED_MODE) {
+        throw std::runtime_error("could not initialize COM");
+    }
+
+    HRESULT result = E_FAIL;
+    {
+        ComPtr<IWICImagingFactory> factory;
+        ComPtr<IWICStream> stream;
+        ComPtr<IWICBitmapEncoder> encoder;
+        ComPtr<IWICBitmapFrameEncode> frame;
+        ComPtr<IPropertyBag2> properties;
+        WICPixelFormatGUID pixel_format = GUID_WICPixelFormat32bppBGRA;
+
+        result = CoCreateInstance(
+            CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+            IID_PPV_ARGS(&factory));
+        if (SUCCEEDED(result)) {
+            result = factory->CreateStream(&stream);
+        }
+        if (SUCCEEDED(result)) {
+            result = stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE);
+        }
+        if (SUCCEEDED(result)) {
+            result = factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder);
+        }
+        if (SUCCEEDED(result)) {
+            result = encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache);
+        }
+        if (SUCCEEDED(result)) {
+            result = encoder->CreateNewFrame(&frame, &properties);
+        }
+        if (SUCCEEDED(result)) {
+            result = frame->Initialize(properties.Get());
+        }
+        if (SUCCEEDED(result)) {
+            result = frame->SetSize(width, height);
+        }
+        if (SUCCEEDED(result)) {
+            result = frame->SetPixelFormat(&pixel_format);
+        }
+        if (SUCCEEDED(result) && pixel_format == GUID_WICPixelFormat32bppBGRA) {
+            result = frame->WritePixels(
+                height, stride, static_cast<UINT>(pixels.size()),
+                const_cast<unsigned char*>(pixels.data()));
+        } else if (SUCCEEDED(result)) {
+            result = WINCODEC_ERR_UNSUPPORTEDPIXELFORMAT;
+        }
+        if (SUCCEEDED(result)) {
+            result = frame->Commit();
+        }
+        if (SUCCEEDED(result)) {
+            result = encoder->Commit();
+        }
+    }
+    if (uninitialize) {
+        CoUninitialize();
+    }
+    if (FAILED(result)) {
+        throw std::runtime_error("could not encode WIC PNG image");
+    }
+}
+
+std::vector<unsigned char> PremultiplyBgra(
+    std::vector<unsigned char> pixels) {
+    assert(pixels.size() % 4 == 0);
+    for (std::size_t offset = 0; offset < pixels.size(); offset += 4) {
+        const unsigned alpha = pixels[offset + 3];
+        for (std::size_t channel = 0; channel < 3; ++channel) {
+            pixels[offset + channel] = static_cast<unsigned char>(
+                (pixels[offset + channel] * alpha + 127U) / 255U);
+        }
+    }
+    return pixels;
+}
+
+bool HasTransparency(const std::vector<unsigned char>& pixels) {
+    assert(pixels.size() % 4 == 0);
+    for (std::size_t offset = 3; offset < pixels.size(); offset += 4) {
+        if (pixels[offset] != 255) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::vector<unsigned char> ReadWicFramePixels(
     const fs::path& path, UINT frame_index) {
     using Microsoft::WRL::ComPtr;
@@ -497,14 +596,33 @@ int main() {
         assert(cache.copied_count == 1);
         assert(cache.removed_count == 0);
         assert(fs::exists(hello_cache));
-
-        // Size and timestamp alone are not sufficient cache identities. An
-        // externally replaced image can preserve both, so compare contents.
         const fs::path hello_source = loaded.images[0].source_path;
-        const auto hello_time = fs::last_write_time(hello_source);
+        const auto hello_source_pixels = ReadWicFramePixels(hello_source, 0);
+        assert(HasTransparency(hello_source_pixels));
+        assert(ReadWicFramePixels(hello_cache, 0) ==
+               PremultiplyBgra(hello_source_pixels));
+        assert(fs::exists(hello_cache.wstring() + L".source"));
+
+        // Native BMP cache identity also includes file contents. An external
+        // replacement can preserve both the size and timestamp.
+        const fs::path native_images = root / L"native-images";
+        const fs::path native_source = native_images / L"native.bmp";
+        CopyFixture(native_source, L"formats/0b-bmp.bmp");
+        mojie::GlobalConfig native_config;
+        native_config.sources.push_back(
+            {mojie::SourceKind::Directory, native_images, false});
+        assert(mojie::ScanAndReconcile(native_config).present_count == 1);
+        auto native_cache = mojie::SyncManagedCache(
+            native_config, root / L"native-data");
+        assert(native_cache.diagnostics.empty());
+        assert(native_cache.copied_count == 1);
+        const fs::path native_destination =
+            root / L"native-data" / L"Font" / L"mojie" /
+            (native_config.images[0].cache_stem + L".bmp");
+        const auto native_time = fs::last_write_time(native_source);
         std::vector<char> changed_bytes;
         {
-            std::ifstream input(hello_source, std::ios::binary);
+            std::ifstream input(native_source, std::ios::binary);
             changed_bytes.assign(
                 std::istreambuf_iterator<char>(input),
                 std::istreambuf_iterator<char>());
@@ -512,17 +630,17 @@ int main() {
         assert(!changed_bytes.empty());
         changed_bytes.back() ^= 1;
         {
-            std::ofstream output(hello_source, std::ios::binary | std::ios::trunc);
+            std::ofstream output(native_source, std::ios::binary | std::ios::trunc);
             output.write(changed_bytes.data(),
                          static_cast<std::streamsize>(changed_bytes.size()));
         }
-        fs::last_write_time(hello_source, hello_time);
-        cache = mojie::SyncManagedCache(loaded, root / L"data");
-        assert(cache.diagnostics.empty());
-        assert(cache.copied_count == 1);
+        fs::last_write_time(native_source, native_time);
+        native_cache = mojie::SyncManagedCache(native_config, root / L"native-data");
+        assert(native_cache.diagnostics.empty());
+        assert(native_cache.copied_count == 1);
         {
-            std::ifstream source_after(hello_source, std::ios::binary);
-            std::ifstream cache_after(hello_cache, std::ios::binary);
+            std::ifstream source_after(native_source, std::ios::binary);
+            std::ifstream cache_after(native_destination, std::ios::binary);
             assert(std::vector<char>(
                        std::istreambuf_iterator<char>(source_after),
                        std::istreambuf_iterator<char>()) ==
@@ -536,6 +654,22 @@ int main() {
         assert(cache.copied_count == 0);
         assert(fs::exists(hello_cache));
 
+        // Manual regeneration rebuilds every currently recognized image,
+        // including disabled entries, and never accepts an existing cache as
+        // fresh.
+        {
+            std::ofstream output(hello_cache, std::ios::binary | std::ios::trunc);
+            output << "stale cache";
+        }
+        cache = mojie::RegenerateManagedCache(loaded, root / L"data");
+        assert(cache.diagnostics.empty());
+        assert(cache.copied_count == 2);
+        assert(ReadWicFramePixels(hello_cache, 0) ==
+               PremultiplyBgra(ReadWicFramePixels(hello_source, 0)));
+        cache = mojie::RegenerateManagedCache(loaded, root / L"data");
+        assert(cache.diagnostics.empty());
+        assert(cache.copied_count == 2);
+
         // Cache synchronization is copy-only. A generated-looking file may
         // be user-owned or required by project data and must never be removed.
         CopyFixture(cache_directory / L"mojie_user_owned.png", L"4m.png");
@@ -543,6 +677,63 @@ int main() {
         assert(cache.diagnostics.empty());
         assert(cache.removed_count == 0);
         assert(fs::exists(cache_directory / L"mojie_user_owned.png"));
+
+        // PNG stores straight alpha. Transparent PNG cache pixels are written
+        // with premultiplied color values for AviUtl2's emoji renderer.
+        const fs::path alpha_images = root / L"alpha-images";
+        const fs::path alpha_source = alpha_images / L"alpha.png";
+        const std::vector<unsigned char> straight_alpha_pixels = {
+            255, 255, 255,   0,
+             80, 120, 200, 128,
+             10,  20,  30, 255,
+        };
+        WriteBgraPng(alpha_source, 3, 1, straight_alpha_pixels);
+        assert(ReadWicFramePixels(alpha_source, 0) == straight_alpha_pixels);
+        mojie::GlobalConfig alpha_config;
+        alpha_config.sources.push_back(
+            {mojie::SourceKind::Directory, alpha_images, false});
+        assert(mojie::ScanAndReconcile(alpha_config).present_count == 1);
+        auto alpha_cache = mojie::SyncManagedCache(
+            alpha_config, root / L"alpha-data");
+        assert(alpha_cache.diagnostics.empty());
+        assert(alpha_cache.copied_count == 1);
+        const fs::path alpha_destination =
+            root / L"alpha-data" / L"Font" / L"mojie" /
+            (alpha_config.images[0].cache_stem + L".png");
+        assert(ReadWicFramePixels(alpha_destination, 0) ==
+               PremultiplyBgra(straight_alpha_pixels));
+        assert(fs::exists(alpha_destination.wstring() + L".source"));
+        alpha_cache = mojie::SyncManagedCache(alpha_config, root / L"alpha-data");
+        assert(alpha_cache.diagnostics.empty());
+        assert(alpha_cache.copied_count == 0);
+
+        const fs::path opaque_images = root / L"opaque-images";
+        const fs::path opaque_source = opaque_images / L"opaque.png";
+        const std::vector<unsigned char> opaque_pixels = {
+             10,  20,  30, 255,
+            200, 120,  80, 255,
+        };
+        WriteBgraPng(opaque_source, 2, 1, opaque_pixels);
+        mojie::GlobalConfig opaque_config;
+        opaque_config.sources.push_back(
+            {mojie::SourceKind::Directory, opaque_images, false});
+        assert(mojie::ScanAndReconcile(opaque_config).present_count == 1);
+        auto opaque_cache = mojie::SyncManagedCache(
+            opaque_config, root / L"opaque-data");
+        assert(opaque_cache.diagnostics.empty());
+        assert(opaque_cache.copied_count == 1);
+        const fs::path opaque_destination =
+            root / L"opaque-data" / L"Font" / L"mojie" /
+            (opaque_config.images[0].cache_stem + L".png");
+        std::ifstream opaque_source_stream(opaque_source, std::ios::binary);
+        std::ifstream opaque_cache_stream(opaque_destination, std::ios::binary);
+        assert(std::vector<char>(
+                   std::istreambuf_iterator<char>(opaque_source_stream),
+                   std::istreambuf_iterator<char>()) ==
+               std::vector<char>(
+                   std::istreambuf_iterator<char>(opaque_cache_stream),
+                   std::istreambuf_iterator<char>()));
+        assert(!fs::exists(opaque_destination.wstring() + L".source"));
 
         const fs::path format_images = root / L"format-images";
         // These are real containers produced from testimage/0b.png. Optional
@@ -609,7 +800,8 @@ int main() {
                 const auto first_frame = ReadWicFramePixels(image.source_path, 0);
                 const auto second_frame = ReadWicFramePixels(image.source_path, 1);
                 assert(first_frame != second_frame);
-                assert(ReadWicFramePixels(converted, 0) == first_frame);
+                assert(ReadWicFramePixels(converted, 0) ==
+                       PremultiplyBgra(first_frame));
             }
         }
         format_cache = mojie::SyncManagedCache(format_config, root / L"format-data");
@@ -620,6 +812,9 @@ int main() {
         scan = mojie::ScanAndReconcile(loaded);
         assert(scan.present_count == 1);
         assert(scan.missing_count == 1);
+        cache = mojie::RegenerateManagedCache(loaded, root / L"data");
+        assert(cache.diagnostics.empty());
+        assert(cache.copied_count == 1);
         assert(mojie::UnregisterMissingImages(loaded) == 1);
         assert(loaded.images.size() == 1);
         // Unregistering an image must not rewrite the user's composition.

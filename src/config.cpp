@@ -12,6 +12,7 @@
 #include <cwctype>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -74,9 +75,106 @@ std::wstring LowerExtension(const fs::path& path) {
     return extension;
 }
 
-bool IsNativeFontImage(const fs::path& path) {
+struct DecodedBgraFrame {
+    UINT width = 0;
+    UINT height = 0;
+    UINT stride = 0;
+    std::vector<BYTE> pixels;
+};
+
+bool DecodeFirstFrameToBgra(
+    const fs::path& source,
+    DecodedBgraFrame& decoded) {
+    const HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const bool uninitialize = apartment == S_OK || apartment == S_FALSE;
+    if (FAILED(apartment) && apartment != RPC_E_CHANGED_MODE) {
+        return false;
+    }
+
+    bool succeeded = false;
+    {
+        ComPtr<IWICImagingFactory> factory;
+        ComPtr<IWICBitmapDecoder> decoder;
+        ComPtr<IWICBitmapFrameDecode> frame;
+        ComPtr<IWICFormatConverter> converter;
+        UINT width = 0;
+        UINT height = 0;
+
+        HRESULT result = CoCreateInstance(
+            CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+            IID_PPV_ARGS(&factory));
+        if (SUCCEEDED(result)) {
+            result = factory->CreateDecoderFromFilename(
+                source.c_str(), nullptr, GENERIC_READ,
+                WICDecodeMetadataCacheOnLoad, &decoder);
+        }
+        if (SUCCEEDED(result)) {
+            result = decoder->GetFrame(0, &frame);
+        }
+        if (SUCCEEDED(result)) {
+            result = frame->GetSize(&width, &height);
+        }
+        if (SUCCEEDED(result) && width != 0 && height != 0 &&
+            width <= std::numeric_limits<UINT>::max() / 4) {
+            result = factory->CreateFormatConverter(&converter);
+        } else if (SUCCEEDED(result)) {
+            result = E_INVALIDARG;
+        }
+        if (SUCCEEDED(result)) {
+            result = converter->Initialize(
+                frame.Get(), GUID_WICPixelFormat32bppBGRA,
+                WICBitmapDitherTypeNone, nullptr, 0.0,
+                WICBitmapPaletteTypeCustom);
+        }
+        const UINT stride = width * 4;
+        if (SUCCEEDED(result) &&
+            height <= std::numeric_limits<UINT>::max() / stride) {
+            const UINT buffer_size = stride * height;
+            decoded.pixels.resize(buffer_size);
+            result = converter->CopyPixels(
+                nullptr, stride, buffer_size, decoded.pixels.data());
+            if (SUCCEEDED(result)) {
+                decoded.width = width;
+                decoded.height = height;
+                decoded.stride = stride;
+            }
+        } else if (SUCCEEDED(result)) {
+            result = E_OUTOFMEMORY;
+        }
+        succeeded = SUCCEEDED(result);
+    }
+
+    if (uninitialize) {
+        CoUninitialize();
+    }
+    return succeeded;
+}
+
+std::optional<bool> PngHasTransparency(const fs::path& source) {
+    DecodedBgraFrame decoded;
+    if (!DecodeFirstFrameToBgra(source, decoded)) {
+        return std::nullopt;
+    }
+    for (std::size_t offset = 3; offset < decoded.pixels.size(); offset += 4) {
+        if (decoded.pixels[offset] != 255) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ShouldCopyNativeFontImage(const fs::path& path) {
     const std::wstring extension = LowerExtension(path);
-    return extension == L".png" || extension == L".bmp";
+    if (extension == L".bmp") {
+        return true;
+    }
+    if (extension != L".png") {
+        return false;
+    }
+    // Preserve the previous copy behavior if WIC cannot inspect a PNG. A
+    // decodable PNG with transparent pixels must be rewritten because the
+    // AviUtl2 emoji path consumes premultiplied-alpha color values.
+    return !PngHasTransparency(path).value_or(false);
 }
 
 std::optional<std::uint64_t> HashFileContents(const fs::path& path) {
@@ -157,6 +255,19 @@ bool SaveFingerprintAtomic(
 }
 
 bool ConvertFirstFrameToPng(const fs::path& source, const fs::path& destination) {
+    DecodedBgraFrame decoded;
+    if (!DecodeFirstFrameToBgra(source, decoded)) {
+        return false;
+    }
+    for (std::size_t offset = 0; offset < decoded.pixels.size(); offset += 4) {
+        const unsigned alpha = decoded.pixels[offset + 3];
+        for (std::size_t channel = 0; channel < 3; ++channel) {
+            const unsigned color = decoded.pixels[offset + channel];
+            decoded.pixels[offset + channel] = static_cast<BYTE>(
+                (color * alpha + 127U) / 255U);
+        }
+    }
+
     const HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const bool uninitialize = apartment == S_OK || apartment == S_FALSE;
     if (FAILED(apartment) && apartment != RPC_E_CHANGED_MODE) {
@@ -166,40 +277,15 @@ bool ConvertFirstFrameToPng(const fs::path& source, const fs::path& destination)
     bool succeeded = false;
     {
         ComPtr<IWICImagingFactory> factory;
-        ComPtr<IWICBitmapDecoder> decoder;
-        ComPtr<IWICBitmapFrameDecode> frame;
-        ComPtr<IWICFormatConverter> converter;
         ComPtr<IWICStream> stream;
         ComPtr<IWICBitmapEncoder> encoder;
         ComPtr<IWICBitmapFrameEncode> output_frame;
         ComPtr<IPropertyBag2> properties;
-        UINT width = 0;
-        UINT height = 0;
         WICPixelFormatGUID pixel_format = GUID_WICPixelFormat32bppBGRA;
 
         HRESULT result = CoCreateInstance(
             CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
             IID_PPV_ARGS(&factory));
-        if (SUCCEEDED(result)) {
-            result = factory->CreateDecoderFromFilename(
-                source.c_str(), nullptr, GENERIC_READ,
-                WICDecodeMetadataCacheOnLoad, &decoder);
-        }
-        if (SUCCEEDED(result)) {
-            result = decoder->GetFrame(0, &frame);
-        }
-        if (SUCCEEDED(result)) {
-            result = frame->GetSize(&width, &height);
-        }
-        if (SUCCEEDED(result) && width != 0 && height != 0) {
-            result = factory->CreateFormatConverter(&converter);
-        }
-        if (SUCCEEDED(result) && converter) {
-            result = converter->Initialize(
-                frame.Get(), GUID_WICPixelFormat32bppBGRA,
-                WICBitmapDitherTypeNone, nullptr, 0.0,
-                WICBitmapPaletteTypeCustom);
-        }
         if (SUCCEEDED(result)) {
             result = factory->CreateStream(&stream);
         }
@@ -219,13 +305,16 @@ bool ConvertFirstFrameToPng(const fs::path& source, const fs::path& destination)
             result = output_frame->Initialize(properties.Get());
         }
         if (SUCCEEDED(result)) {
-            result = output_frame->SetSize(width, height);
+            result = output_frame->SetSize(decoded.width, decoded.height);
         }
         if (SUCCEEDED(result)) {
             result = output_frame->SetPixelFormat(&pixel_format);
         }
         if (SUCCEEDED(result) && pixel_format == GUID_WICPixelFormat32bppBGRA) {
-            result = output_frame->WriteSource(converter.Get(), nullptr);
+            result = output_frame->WritePixels(
+                decoded.height, decoded.stride,
+                static_cast<UINT>(decoded.pixels.size()),
+                decoded.pixels.data());
         } else if (SUCCEEDED(result)) {
             result = WINCODEC_ERR_UNSUPPORTEDPIXELFORMAT;
         }
@@ -1131,10 +1220,13 @@ std::size_t UnregisterMissingImages(LocalConfig& config) {
     return previous_size - config.images.size();
 }
 
-CacheSyncResult SyncManagedCache(
+namespace {
+
+CacheSyncResult SyncManagedCacheImpl(
     GlobalConfig& config,
     const fs::path& app_data_path,
-    const CacheSyncFailureHandler& failure_handler) {
+    const CacheSyncFailureHandler& failure_handler,
+    bool force_regeneration) {
     CacheSyncResult result;
     const fs::path cache_directory = app_data_path / L"Font" / L"mojie";
     std::error_code error;
@@ -1145,17 +1237,17 @@ CacheSyncResult SyncManagedCache(
     }
 
     for (auto& image : config.images) {
-        if (!image.present || !image.enabled) {
+        if (!image.present || (!force_regeneration && !image.enabled)) {
             continue;
         }
         PopulateRuntimeFields(image, {});
-        const bool native_image = IsNativeFontImage(image.source_path);
+        const bool native_image = ShouldCopyNativeFontImage(image.source_path);
         const std::wstring cache_extension = native_image
             ? LowerExtension(image.source_path) : L".png";
         const fs::path destination =
             cache_directory / (image.cache_stem + cache_extension);
         const fs::path fingerprint = destination.wstring() + L".source";
-        if (native_image) {
+        if (!force_regeneration && native_image) {
             std::error_code source_size_error;
             std::error_code destination_size_error;
             std::error_code source_time_error;
@@ -1170,7 +1262,8 @@ CacheSyncResult SyncManagedCache(
                 FilesHaveSameContents(image.source_path, destination)) {
                 continue;
             }
-        } else if (FingerprintMatches(image.source_path, destination, fingerprint)) {
+        } else if (!force_regeneration &&
+                   FingerprintMatches(image.source_path, destination, fingerprint)) {
             continue;
         }
 
@@ -1225,6 +1318,24 @@ CacheSyncResult SyncManagedCache(
     // by a temporarily unavailable global or local source. Cleanup requires a
     // durable ownership manifest first.
     return result;
+}
+
+} // namespace
+
+CacheSyncResult SyncManagedCache(
+    GlobalConfig& config,
+    const fs::path& app_data_path,
+    const CacheSyncFailureHandler& failure_handler) {
+    return SyncManagedCacheImpl(
+        config, app_data_path, failure_handler, false);
+}
+
+CacheSyncResult RegenerateManagedCache(
+    GlobalConfig& config,
+    const fs::path& app_data_path,
+    const CacheSyncFailureHandler& failure_handler) {
+    return SyncManagedCacheImpl(
+        config, app_data_path, failure_handler, true);
 }
 
 std::unordered_map<std::wstring, std::size_t> BuildReplacementIndex(const GlobalConfig& config) {
