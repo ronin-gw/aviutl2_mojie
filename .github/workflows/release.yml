@@ -60,17 +60,24 @@ jobs:
           }
           $plugin = Get-Item -LiteralPath "build/bin/Release/mojie.aux2"
           $alias = Get-Item -LiteralPath "assets/Alias/mojieテキスト.object"
+          $aliasAsset = "$($alias.FullName)#mojieテキスト.object"
+          $isPrerelease = $tag.Substring(1) -match '[A-Za-z]'
           $assets = @(
             $packages[0].FullName,
             $checksums[0].FullName,
             $plugin.FullName,
-            $alias.FullName
+            $aliasAsset
           )
           gh release view $tag --json tagName *> $null
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag @assets --clobber
+            if ($isPrerelease) {
+              gh release edit $tag --prerelease
+            } else {
+              gh release edit $tag --prerelease=false
+            }
           } else {
-            if ($tag -match '[A-Za-z]') {
+            if ($isPrerelease) {
               gh release create $tag @assets --generate-notes --verify-tag --prerelease --title "mojie $tag"
             } else {
               gh release create $tag @assets --generate-notes --verify-tag --title "mojie $tag"
