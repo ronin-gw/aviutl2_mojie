@@ -22,7 +22,7 @@ jobs:
           git -C .deps/aviutl2_sdk checkout --detach FETCH_HEAD
 
       - name: Configure
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DMOJIE_AVIUTL2_SDK_DIR="${{ github.workspace }}/.deps/aviutl2_sdk"
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DMOJIE_AVIUTL2_SDK_DIR="${{ github.workspace }}/.deps/aviutl2_sdk" -DMOJIE_BUILD_CONFIG_TESTS=OFF
 
       - name: Build
         run: cmake --build build --config Release --parallel

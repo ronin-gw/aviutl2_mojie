@@ -23,5 +23,5 @@ dist/
 *.au2pkg.zip
 
 #
-testimage/orig
+testimage/
 docs/

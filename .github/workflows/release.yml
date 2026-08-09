@@ -34,7 +34,7 @@ jobs:
           git -C .deps/aviutl2_sdk checkout --detach FETCH_HEAD
 
       - name: Configure
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DMOJIE_AVIUTL2_SDK_DIR="${{ github.workspace }}/.deps/aviutl2_sdk"
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DMOJIE_AVIUTL2_SDK_DIR="${{ github.workspace }}/.deps/aviutl2_sdk" -DMOJIE_BUILD_CONFIG_TESTS=OFF
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -58,7 +58,14 @@ jobs:
           if ($packages.Count -ne 1 -or $checksums.Count -ne 1) {
             throw "Expected exactly one release package and one checksum file."
           }
-          $assets = @($packages[0].FullName, $checksums[0].FullName)
+          $plugin = Get-Item -LiteralPath "build/bin/Release/mojie.aux2"
+          $alias = Get-Item -LiteralPath "assets/Alias/mojieテキスト.object"
+          $assets = @(
+            $packages[0].FullName,
+            $checksums[0].FullName,
+            $plugin.FullName,
+            $alias.FullName
+          )
           gh release view $tag --json tagName *> $null
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag @assets --clobber

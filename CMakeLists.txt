@@ -9,7 +9,7 @@ project(
   LANGUAGES CXX
 )
 
-set(MOJIE_VERSION_SUFFIX "a2")
+set(MOJIE_VERSION_SUFFIX "")
 set(MOJIE_VERSION "${PROJECT_VERSION}${MOJIE_VERSION_SUFFIX}")
 
 configure_file(
@@ -20,6 +20,17 @@ configure_file(
 
 include(FetchContent)
 include(CTest)
+
+set(MOJIE_CONFIG_TESTS_DEFAULT OFF)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/testimage/1m.png")
+  set(MOJIE_CONFIG_TESTS_DEFAULT ON)
+endif()
+option(
+  MOJIE_BUILD_CONFIG_TESTS
+  "Build configuration tests that require local testimage fixtures"
+  ${MOJIE_CONFIG_TESTS_DEFAULT}
+)
+unset(MOJIE_CONFIG_TESTS_DEFAULT)
 
 FetchContent_Declare(
   nlohmann_json
@@ -109,19 +120,27 @@ if(BUILD_TESTING)
   )
   add_test(NAME replacement COMMAND mojie_replacement_tests)
 
-  add_executable(mojie_config_tests tests/config_tests.cpp)
-  target_link_libraries(mojie_config_tests PRIVATE mojie_core)
-  target_compile_features(mojie_config_tests PRIVATE cxx_std_17)
-  target_compile_definitions(mojie_config_tests PRIVATE
-    MOJIE_TESTIMAGE_DIR=L"${CMAKE_CURRENT_SOURCE_DIR}/testimage"
-  )
-  if(MSVC)
-    target_compile_options(mojie_config_tests PRIVATE /utf-8 /W4 /permissive- /EHsc)
+  if(MOJIE_BUILD_CONFIG_TESTS)
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/testimage/1m.png")
+      message(FATAL_ERROR
+        "MOJIE_BUILD_CONFIG_TESTS requires the local testimage fixtures. "
+        "Set MOJIE_BUILD_CONFIG_TESTS=OFF when they are unavailable."
+      )
+    endif()
+    add_executable(mojie_config_tests tests/config_tests.cpp)
+    target_link_libraries(mojie_config_tests PRIVATE mojie_core)
+    target_compile_features(mojie_config_tests PRIVATE cxx_std_17)
+    target_compile_definitions(mojie_config_tests PRIVATE
+      MOJIE_TESTIMAGE_DIR=L"${CMAKE_CURRENT_SOURCE_DIR}/testimage"
+    )
+    if(MSVC)
+      target_compile_options(mojie_config_tests PRIVATE /utf-8 /W4 /permissive- /EHsc)
+    endif()
+    set_target_properties(mojie_config_tests PROPERTIES
+      MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+    )
+    add_test(NAME config COMMAND mojie_config_tests)
   endif()
-  set_target_properties(mojie_config_tests PROPERTIES
-    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
-  )
-  add_test(NAME config COMMAND mojie_config_tests)
 
   add_executable(mojie_width_normalization_tests tests/width_normalization_tests.cpp)
   target_link_libraries(mojie_width_normalization_tests PRIVATE mojie_core)
